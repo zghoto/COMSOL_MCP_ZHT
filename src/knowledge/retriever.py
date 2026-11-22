@@ -232,13 +232,15 @@ class VectorRetriever:
         
         # Get unique modules
         modules = set()
+        page_size = 5000  # Keep large metadata lookups within SQLite's parameter limit.
         try:
-            results = self._collection.get(include=["metadatas"])
-            for meta in results.get("metadatas", []):
-                if meta and "module" in meta:
-                    modules.add(meta["module"])
-        except Exception:
-            pass
+            for offset in range(0, count, page_size):
+                results = self._collection.get(limit=page_size, offset=offset, include=["metadatas"])
+                for meta in results.get("metadatas", []):
+                    if meta and "module" in meta:
+                        modules.add(meta["module"])
+        except Exception as e:
+            logger.warning(f"Failed to read indexed modules: {e}")
         
         return {
             "initialized": True,

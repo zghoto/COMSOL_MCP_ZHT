@@ -19,6 +19,7 @@ from .tools.audit import register_audit_tools, register_boundary_info_tool
 from .tools.modify import register_modify_tools, register_interpolate_tool, register_material_function_tools
 from .resources.model_resources import register_model_resources
 from .knowledge.embedded import register_knowledge_tools
+from .knowledge.pdf_processor import check_pdf_dependencies
 
 logging.basicConfig(level=logging.INFO)
 # MPh logs at INFO level while the JVM starts, which deadlocks with JPype (reproduced on Windows + COMSOL 6.3)
@@ -66,6 +67,9 @@ def main() -> None:
     transport = os.environ.get("COMSOL_MCP_TRANSPORT", "stdio").strip().lower()
 
     if transport == "stdio":
+        if os.name == "nt":
+            # Load the PDF search stack before the COMSOL JVM can block SciPy's native imports.
+            check_pdf_dependencies()
         # The stdio transport immediately spawns a thread blocked on stdin (fd 0), and
         # JPype's startJVM deadlocks forever while fd 0 is read by another thread, so the
         # JVM must be started before mcp.run() (reproduced on Windows + COMSOL 6.3).
