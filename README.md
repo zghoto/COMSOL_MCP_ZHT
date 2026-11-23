@@ -1,10 +1,14 @@
-# COMSOL MCP Server
+# COMSOL_MCP_ZHT
 
 MCP Server for COMSOL Multiphysics simulation automation via AI agents.
 
 English | [中文](README_CN.md)
 
-## Star History
+## About this fork
+
+`COMSOL_MCP_ZHT` extends the upstream COMSOL-MCP project on the `zht` branch. It supports working on a shared model with COMSOL Desktop and adds tools for geometry queries, meshing, study configuration, and results. It also fixes PDF search startup on Windows and module counts in the documentation index. [Upstream COMSOL-MCP](https://github.com/wjc9011/COMSOL_Multiphysics_MCP)
+
+## Upstream Star History
 
 [![GitHub stars](https://img.shields.io/github/stars/wjc9011/COMSOL_Multiphysics_MCP?style=social)](https://github.com/wjc9011/COMSOL_Multiphysics_MCP/stargazers)
 
@@ -12,7 +16,7 @@ English | [中文](README_CN.md)
 
 ## Publication and Citation
 
-The research paper describing COMSOL-MCP is available in *Neurocomputing*:
+The paper describing the upstream COMSOL-MCP project is available in *Neurocomputing*.
 
 > Naiyin Zhang and Junchao Wang, “[COMSOL-MCP: An open-source model context protocol interface for AI-assisted multiphysics simulation](https://doi.org/10.1016/j.neucom.2026.134481),” *Neurocomputing*, vol. 703, article 134481, 2026.
 
@@ -59,9 +63,9 @@ Build a complete COMSOL MCP Server enabling AI agents (like Claude, opencode) to
 ## Installation
 
 ```bash
-# Clone repository
-git clone https://github.com/wjc9011/COMSOL_Multiphysics_MCP.git
-cd COMSOL_Multiphysics_MCP
+# Clone this fork's development branch
+git clone --branch zht https://github.com/zghoto/COMSOL_MCP_ZHT.git
+cd COMSOL_MCP_ZHT
 
 # Install dependencies
 python -m pip install -e .
@@ -120,6 +124,22 @@ Create `opencode.json` in project root:
   }
 }
 ```
+
+### Share a live model with COMSOL Desktop
+
+1. Start COMSOL Multiphysics Server with `comsolmphserver -multi on -port 2036`. Use the port the server actually reports and the same COMSOL version for Desktop and the MCP client.
+2. Set `COMSOL_MCP_SERVER_PORT=2036` in the MCP process environment and restart the MCP connector. `COMSOL_MCP_SERVER_HOST` defaults to `localhost`. Use `COMSOL_MCP_VERSION` to select the installed COMSOL version. For explicit authentication, set both `COMSOL_MCP_SERVER_USERNAME` and `COMSOL_MCP_SERVER_PASSWORD` in the local runtime environment. If both are unset, MPh uses the COMSOL client's saved login.
+3. In Desktop, choose **File → COMSOL Multiphysics Server → Connect to Server**. To watch a model created by the agent, choose **Import Application from Server** and select it. To work on a Desktop model, call `model_list` and pass its `tag` as `model_name` to `model_set_current`.
+
+`comsol_status` reports the active host and port. `comsol_disconnect` releases the MCP connection and local selection. With `-multi on`, you can reconnect using `comsol_start` and select the same model tag. With no server port configured, the default startup is standalone. [COMSOL client–server guide](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.20.html)
+
+### Mesh, studies, and derived results
+
+1. Build the geometry and call `geometry_boundary_info(spatial_details=true)` for adjacency, bounds, and sampled normals. Use `geometry_get_edges` and `geometry_get_domains` to query specific entity IDs.
+2. Add mesh operations with `mesh_add_feature`. Use `insert_before` for a local size that must precede a mesher, and `parent` for subfeatures. Run `mesh_create` before inspecting counts and quality with `mesh_info`.
+3. Configure equations with `study_configure_step` and add or update one parameter in a study sweep with `param_sweep_setup`. Pass `log_progress=true` to either solve tool to see the COMSOL log tail in the returned status or `study_get_progress`.
+4. Find dataset tags with `datasets_list`. Use `results_stat` for domain or boundary extrema, averages, and integrals, or `results_numerical_evaluate` for an existing numerical node. Results retain real and imaginary parts and solution indices. Use `outer` to pick an outer sweep solution.
+5. Build a plot group with `results_plot_add`, then pass its `plot_group` tag and a PNG path to `results_export_image`. The export uses a temporary export node.
 
 ## Code Structure
 
@@ -181,8 +201,8 @@ comsol_mcp/
 | Tool | Description |
 |------|-------------|
 | `comsol_start` | Start local COMSOL client |
-| `comsol_connect` | Connect to remote server |
-| `comsol_disconnect` | Clear session |
+| `comsol_connect` | Connect to a COMSOL Multiphysics Server |
+| `comsol_disconnect` | Disconnect from a shared server or clear a standalone session |
 | `comsol_status` | Get session info |
 
 ### Model (9)
@@ -494,6 +514,15 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `comsol://model/{name}/tree` | Model tree structure |
 | `comsol://model/{name}/parameters` | Model parameters |
 | `comsol://model/{name}/physics` | Physics interfaces |
+
+## Acknowledgments
+
+Thanks to the maintainers and contributors of these projects.
+
+- The upstream COMSOL-MCP project provides the MCP server, MPh integration, and the original simulation tools and documentation. [wjc9011/COMSOL_Multiphysics_MCP](https://github.com/wjc9011/COMSOL_Multiphysics_MCP)
+- COMSOLPilot informed the workflow for sharing a server-side model between COMSOL Desktop and the MCP client. [waverlose/COMSOLPilot](https://github.com/waverlose/COMSOLPilot/tree/7c79c78ea8bb92aec6e5b07c4877b169dd9cffb8)
+- Jui Junnarkar's physics-aware fork helped identify useful mesh, study, and results capabilities. The corresponding extensions here were implemented independently using the COMSOL Java API. [juijunnarkar/COMSOL_Multiphysics_MCP](https://github.com/juijunnarkar/COMSOL_Multiphysics_MCP/tree/4b0a0afc5db1ad9befcde8e623987d62a985bba2)
+- The AcousticSimulationAgent notes served as a reference for acoustic modeling and result verification workflows. [Qiuu2/algo · acoustic-simulation](https://github.com/Qiuu2/algo/tree/ee7b2989f82c969f2c75d29cb223a90aadd69df9/agents/acoustic-simulation)
 
 ## License
 

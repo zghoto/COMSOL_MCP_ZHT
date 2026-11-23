@@ -1,10 +1,14 @@
-# COMSOL MCP Server
+# COMSOL_MCP_ZHT
 
 基于 MCP 协议的 COMSOL Multiphysics 仿真自动化服务器，支持 AI 代理（如 Claude）直接控制 COMSOL 进行多物理场仿真。
 
 [English](README.md) | 中文
 
-## ⭐ Star History
+## 本仓库简介
+
+`COMSOL_MCP_ZHT` 基于上游 COMSOL-MCP，扩展功能在 `zht` 分支开发。该分支支持 MCP 与 COMSOL Desktop 共用服务端模型，扩展了几何查询、网格、研究步配置和结果后处理工具，并修复了 Windows 下 PDF 检索启动问题及文档索引的模块计数。 [上游 COMSOL-MCP](https://github.com/wjc9011/COMSOL_Multiphysics_MCP)
+
+## ⭐ 上游项目星标历史
 
 [![GitHub stars](https://img.shields.io/github/stars/wjc9011/COMSOL_Multiphysics_MCP?style=social)](https://github.com/wjc9011/COMSOL_Multiphysics_MCP/stargazers)
 
@@ -12,7 +16,7 @@
 
 ## 📄 相关论文与引用
 
-介绍 COMSOL-MCP 的研究论文已发表于 *Neurocomputing*：
+介绍上游 COMSOL-MCP 的研究论文已发表于 *Neurocomputing*。
 
 > Naiyin Zhang and Junchao Wang, “[COMSOL-MCP: An open-source model context protocol interface for AI-assisted multiphysics simulation](https://doi.org/10.1016/j.neucom.2026.134481),” *Neurocomputing*, vol. 703, article 134481, 2026.
 
@@ -61,9 +65,9 @@
 ## 🚀 安装步骤
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/wjc9011/COMSOL_Multiphysics_MCP.git
-cd COMSOL_Multiphysics_MCP
+# 1. 克隆本仓库的开发分支
+git clone --branch zht https://github.com/zghoto/COMSOL_MCP_ZHT.git
+cd COMSOL_MCP_ZHT
 
 # 2. 安装依赖
 python -m pip install -e .
@@ -143,6 +147,22 @@ python scripts/build_knowledge_base.py --status
 }
 ```
 
+### GUI 同步（与 COMSOL Desktop 共用模型）
+
+1. 用 `comsolmphserver -multi on -port 2036` 启动 COMSOL Multiphysics Server。以 Server 实际报告的端口为准，Desktop 和 MCP 客户端使用相同版本的 COMSOL。
+2. 给 MCP 进程设置 `COMSOL_MCP_SERVER_PORT=2036` 后重启连接器。`COMSOL_MCP_SERVER_HOST` 默认为 `localhost`，可用 `COMSOL_MCP_VERSION` 指定本机 COMSOL 版本。需要显式登录时，在本地运行环境同时设置 `COMSOL_MCP_SERVER_USERNAME` 和 `COMSOL_MCP_SERVER_PASSWORD`。两个凭据变量都留空时，MPh 使用 COMSOL 客户端已保存的登录信息。
+3. 在 Desktop 的 **文件 → COMSOL Multiphysics Server → 连接到服务器** 中连接同一地址。要查看 Agent 创建的模型，使用 **从服务器导入 App** 选择它。要接手 Desktop 中的模型，先调用 `model_list`，然后把模型的 `tag` 作为 `model_name` 传给 `model_set_current`。
+
+`comsol_status` 会报告已连接的主机和端口。`comsol_disconnect` 会释放 MCP 连接和本地选中状态。Server 以 `-multi on` 启动时，可用 `comsol_start` 重连后选择同一个模型 `tag`。未设置 Server 端口时，MCP 默认启动独立会话。 [COMSOL 客户端连接文档](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.20.html)
+
+### 网格、求解与结果工具
+
+1. 几何构建后，用 `geometry_boundary_info(spatial_details=true)` 获取边界邻接、包围盒和采样法向。用 `geometry_get_edges` 或 `geometry_get_domains` 查询指定实体编号。
+2. 用 `mesh_add_feature` 添加网格特征。通过 `insert_before` 将局部尺寸放在网格生成步骤之前，通过 `parent` 为现有步骤添加子特征。运行 `mesh_create` 后，`mesh_info` 会报告单元数和质量统计。
+3. 用 `study_configure_step` 按物理接口路径启停研究步的 `solve_for`。`param_sweep_setup` 可更新同一 `Parametric` 步骤中的单个参数。调用 `study_solve` 或 `study_solve_async` 时设置 `log_progress=true`，即可在结果或 `study_get_progress` 中查看 COMSOL 日志末尾。
+4. 用 `datasets_list` 查找数据集 `tag`，再用 `results_stat` 统计域或边界的最值、平均值或积分。`results_numerical_evaluate` 读取现有数值节点。结果保留实部、虚部与解索引，可用 `outer` 选定外层扫参点。
+5. 用 `results_plot_add` 创建绘图组，再给 `results_export_image` 传入 `plot_group`、PNG 路径及可选尺寸。绘图组继续保存在模型内，PNG 导出使用临时导出节点。
+
 ## 📁 代码结构
 
 ```
@@ -181,8 +201,8 @@ COMSOL_Multiphysics_MCP/
 | 工具 | 说明 |
 |------|------|
 | `comsol_start` | 启动本地 COMSOL 客户端 |
-| `comsol_connect` | 连接远程服务器 |
-| `comsol_disconnect` | 清除会话 |
+| `comsol_connect` | 连接 COMSOL Multiphysics Server |
+| `comsol_disconnect` | 断开共享服务器或清除独立会话 |
 | `comsol_status` | 获取会话信息 |
 
 ### 模型管理（9 个）
@@ -444,6 +464,15 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `comsol://model/{name}/tree` | 模型树结构 |
 | `comsol://model/{name}/parameters` | 模型参数 |
 | `comsol://model/{name}/physics` | 物理场接口 |
+
+## 致谢
+
+感谢以下项目的维护者和贡献者。
+
+- 上游 COMSOL-MCP 提供了 MCP 服务器、MPh 集成以及原有仿真工具和文档。 [wjc9011/COMSOL_Multiphysics_MCP](https://github.com/wjc9011/COMSOL_Multiphysics_MCP)
+- COMSOLPilot 为 Desktop 和 MCP 共用同一服务端模型的流程提供了参考。 [waverlose/COMSOLPilot](https://github.com/waverlose/COMSOLPilot/tree/7c79c78ea8bb92aec6e5b07c4877b169dd9cffb8)
+- Jui Junnarkar 的物理感知分支为网格、研究步和结果工具的功能选择提供了参考。本仓库的对应扩展依据 COMSOL Java API 独立实现。 [juijunnarkar/COMSOL_Multiphysics_MCP](https://github.com/juijunnarkar/COMSOL_Multiphysics_MCP/tree/4b0a0afc5db1ad9befcde8e623987d62a985bba2)
+- AcousticSimulationAgent 文档为声学建模和结果验证流程提供了参考。 [Qiuu2/algo · acoustic-simulation](https://github.com/Qiuu2/algo/tree/ee7b2989f82c969f2c75d29cb223a90aadd69df9/agents/acoustic-simulation)
 
 ## 📄 许可证
 

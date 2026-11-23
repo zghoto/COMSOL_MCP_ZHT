@@ -4,6 +4,7 @@ from typing import Optional, Union
 from mcp.server.fastmcp import FastMCP
 
 from .session import session_manager
+from ..utils.studies import find_study
 
 
 def register_parameter_tools(mcp: FastMCP) -> None:
@@ -135,16 +136,20 @@ def register_parameter_tools(mcp: FastMCP) -> None:
         parameter_name: str,
         values: list[Union[str, float]],
         model_name: Optional[str] = None,
-        study_name: Optional[str] = None
+        study_name: Optional[str] = None,
+        sweep_tag: Optional[str] = None,
+        parameter_unit: Optional[str] = None,
     ) -> dict:
         """
-        Set up a parametric sweep for a parameter.
+        Set values for one parameter in a study-level sweep while retaining its other parameters.
         
         Args:
             parameter_name: Name of the parameter to sweep
             values: List of parameter values to sweep through
             model_name: Model name (default: current model)
-            study_name: Study to attach sweep to (default: first study)
+            study_name: Study tag or label (default: first study)
+            sweep_tag: Parametric step tag. When omitted, use the only sweep or create one.
+            parameter_unit: Optional unit for the sweep values, e.g. 'mm'
         
         Returns:
             Sweep configuration confirmation, or error message
@@ -156,39 +161,51 @@ def register_parameter_tools(mcp: FastMCP) -> None:
                 "error": f"Model not found: {model_name or 'no current model'}"
             }
         
+        if not parameter_name.strip() or not values or any(not str(value).strip() for value in values):
+            return {"success": False, "error": "Provide a parameter name and at least one sweep value."}
         try:
-            studies = model.studies()
-            if not studies:
-                return {"success": False, "error": "No studies found in model."}
-            
-            target_study = study_name or studies[0]
-            if target_study not in studies:
-                return {"success": False, "error": f"Study not found: {target_study}"}
-            
-            study_node = model / "studies" / target_study
-            
-            sweep_node = None
+            study = find_study(model.java, study_name)
+            steps = study.feature()
+            tags = [str(tag) for tag in steps.tags()]
+            sweeps = [tag for tag in tags if str(study.feature(tag).getType()) == "Parametric"]
+            if sweep_tag is None and len(sweeps) > 1:
+                return {"success": False, "error": f"Specify one of the Parametric step tags: {sweeps}."}
+            tag = sweep_tag or (sweeps[0] if sweeps else str(steps.uniquetag("param")))
+            if tag in tags and tag not in sweeps:
+                return {"success": False, "error": f"Study step {tag!r} is not a Parametric step."}
+
+            created = tag not in tags
+            sweep = study.create(tag, "Parametric") if created else study.feature(tag)
+            original = None
             try:
-                sweep_node = study_node.create("ParametricSweep")
+                original = {key: list(sweep.getStringArray(key)) for key in ("pname", "plistarr", "punit")}
+                names = [str(name) for name in original["pname"]]
+                if parameter_name in names:
+                    index = names.index(parameter_name)
+                else:
+                    index = names.index("") if "" in names else len(names)
+                    sweep.setIndex("pname", parameter_name, index)
+                sweep.setIndex("plistarr", " ".join(str(value) for value in values), index)
+                if parameter_unit is not None:
+                    sweep.setIndex("punit", parameter_unit, index)
+                if created:
+                    steps.move(tag, 0)
             except Exception:
-                existing_features = [child.name() for child in study_node.children()]
-                for feat in existing_features:
-                    if "parametric" in feat.lower() or "sweep" in feat.lower():
-                        sweep_node = study_node.child(feat)
-                        break
-            
-            if sweep_node is None:
-                return {"success": False, "error": "Could not create or find parametric sweep."}
-            
-            sweep_node.property("pname", [parameter_name])
-            sweep_node.property("plist", values)
-            
+                if created:
+                    steps.remove(tag)
+                elif original is not None:
+                    for key, previous in original.items():
+                        sweep.set(key, previous)
+                raise
+
             return {
                 "success": True,
-                "study": target_study,
+                "study": str(study.tag()),
                 "parameter": parameter_name,
                 "values": values,
-                "sweep_node": sweep_node.name() if hasattr(sweep_node, 'name') else "ParametricSweep",
+                "sweep_node": tag,
+                "expression": str(sweep.getStringArray("plistarr")[index]),
+                "unit": str(sweep.getStringArray("punit")[index]),
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to set up parametric sweep: {str(e)}"}

@@ -1,11 +1,51 @@
 """Asynchronous solver handler for COMSOL simulations."""
 
 import threading
+import logging
 from typing import Optional, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
-import traceback
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+from ..utils.studies import solve_studies
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def capture_solver_log(model_util):
+    """Scope the COMSOL client-side progress log to a single run."""
+    if model_util is None:
+        yield None
+        return
+    with NamedTemporaryFile(prefix="comsol-solve-", suffix=".log", delete=False) as stream:
+        path = stream.name
+    try:
+        model_util.showProgress(path)
+    except Exception:
+        Path(path).unlink(missing_ok=True)
+        raise
+    try:
+        yield path
+    finally:
+        try:
+            model_util.showProgress(False)
+        except Exception:
+            logger.warning("Could not disable COMSOL progress logging.", exc_info=True)
+
+
+def read_solver_log(path):
+    """Read a bounded tail of a log created by capture_solver_log."""
+    try:
+        with Path(path).open("rb") as stream:
+            size = stream.seek(0, 2)
+            stream.seek(max(0, size - 8192))
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 class SolverStatus(Enum):
@@ -27,9 +67,11 @@ class SolverProgress:
     error: Optional[str] = None
     study_name: Optional[str] = None
     model_name: Optional[str] = None
+    log_file: Optional[str] = None
+    runs: Optional[list[dict]] = None
     
     def to_dict(self) -> dict:
-        return {
+        report = {
             "status": self.status.value,
             "progress": self.progress,
             "message": self.message,
@@ -42,6 +84,12 @@ class SolverProgress:
                 (self.end_time or datetime.now()) - self.start_time
             ).total_seconds() if self.start_time else 0,
         }
+        if self.log_file:
+            report["log_file"] = self.log_file
+            report["log_tail"] = read_solver_log(self.log_file)
+        if self.runs is not None:
+            report["runs"] = self.runs
+        return report
 
 
 class AsyncSolver:
@@ -67,7 +115,8 @@ class AsyncSolver:
         self,
         model,
         study_name: Optional[str] = None,
-        progress_callback: Optional[Callable[[float, str], None]] = None
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        model_util=None,
     ) -> bool:
         """
         Start solving a study in a background thread.
@@ -96,36 +145,20 @@ class AsyncSolver:
         
         def solve_thread():
             try:
+                with capture_solver_log(model_util) as path:
+                    with self._lock:
+                        self._progress.log_file = path
+                        self._progress.message = f"Solving study: {study_name or 'all'}..."
+                    runs = solve_studies(model, study_name, cancelled=lambda: self._cancel_flag)
                 with self._lock:
-                    self._progress.message = "Building geometry..."
-                    self._progress.progress = 0.1
-                
+                    self._progress.runs = runs
                 if self._cancel_flag:
                     self._set_cancelled()
                     return
-                
-                with self._lock:
-                    self._progress.message = "Creating mesh..."
-                    self._progress.progress = 0.2
-                
-                if self._cancel_flag:
-                    self._set_cancelled()
-                    return
-                
-                with self._lock:
-                    self._progress.message = f"Solving study: {study_name or 'all'}..."
-                    self._progress.progress = 0.3
-                
-                if self._cancel_flag:
-                    self._set_cancelled()
-                    return
-                
-                model.solve(study_name)
-                
-                if self._cancel_flag:
-                    self._set_cancelled()
-                    return
-                
+
+                if not runs or not runs[-1]["success"]:
+                    raise RuntimeError(runs[-1]["error"] if runs else "No study was run.")
+
                 with self._lock:
                     self._progress.status = SolverStatus.COMPLETED
                     self._progress.progress = 1.0
@@ -137,7 +170,6 @@ class AsyncSolver:
                     
             except Exception as e:
                 error_msg = str(e)
-                tb = traceback.format_exc()
                 
                 with self._lock:
                     self._progress.status = SolverStatus.FAILED

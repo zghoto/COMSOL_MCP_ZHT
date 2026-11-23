@@ -865,8 +865,60 @@ def register_audit_tools(mcp: FastMCP) -> None:
 # Geometry boundary location info
 # ---------------------------------------------------------------------------
 
+def geometry_adjacency(geom, source_dim, target_dim, count):
+    rows = list(geom.getAdj(source_dim, target_dim))
+    if len(rows) == count + 1:
+        rows = rows[1:]  # The entity-indexed table begins with an empty row.
+    if len(rows) != count:
+        raise ValueError(f"Expected {count} adjacency rows, got {len(rows)}.")
+    return [[int(tag) for tag in row if tag > 0] for row in rows]
+
+
+def geometry_entity_details(geom, entity_dim, entity_ids, sample=False):
+    """Measure selected entities on the finalized geometry."""
+    dim = int(geom.getSDim())
+    measurement = geom.measureFinal()
+    selection = measurement.selection()
+    selection.geom(entity_dim)
+    details = []
+    for entity_id in entity_ids:
+        entity = {"entity": entity_id}
+        try:
+            selection.set([entity_id])
+            limits = [float(value) for value in measurement.getBoundingBox()]
+            entity["bounding_box"] = dict(zip(["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"], limits))
+            measure = {1: measurement.getLength, 2: measurement.getArea, 3: measurement.getVolume}
+            if entity_dim in measure:
+                entity["measure"] = float(measure[entity_dim]())
+        except Exception as exc:
+            entity["measurement_error"] = str(exc)
+        if sample and entity_dim in (1, 2):
+            try:
+                if entity_dim == 1:
+                    start, end = (float(value) for value in geom.edgeParamRange(entity_id))
+                    middle = (start + end) / 2
+                    points = geom.edgeX(entity_id, [start, middle, end])
+                    entity["start"], entity["sample_point"], entity["end"] = [
+                        [float(coordinate) for coordinate in point] for point in points
+                    ]
+                    if dim == 2:
+                        entity["normal"] = [float(value) for value in geom.edgeNormal(entity_id, [middle])[0]]
+                elif dim == 3:
+                    from jpype import JArray, JDouble
+
+                    u0, u1, v0, v1 = (float(value) for value in geom.faceParamRange(entity_id))
+                    parameters = JArray(JDouble, 2)([[(u0 + u1) / 2, (v0 + v1) / 2]])
+                    entity["sample_point"] = [float(value) for value in geom.faceX(entity_id, parameters)[0]]
+                    entity["normal"] = [float(value) for value in geom.faceNormal(entity_id, parameters)[0]]
+            except Exception as exc:
+                entity["sampling_error"] = str(exc)
+        details.append(entity)
+    return details
+
+
 def geometry_boundary_info_core(model, geom_tag: Optional[str] = None,
-                                component_tag: Optional[str] = None) -> dict:
+                                component_tag: Optional[str] = None,
+                                spatial_details: bool = False) -> dict:
     """Per-boundary measure + adjacency + geometry bounding box.
 
     Gives the AI spatial context for boundary numbers: how long each boundary
@@ -909,10 +961,10 @@ def geometry_boundary_info_core(model, geom_tag: Optional[str] = None,
             pass
         adjacency = None
         try:
-            adj = g.getAdj(1, 2)  # boundary -> adjacent domains, all at once
-            adjacency = [[int(x) for x in adj[i]] for i in range(len(adj))]
-        except Exception:
-            pass
+            dim = info['space_dim']
+            adjacency = geometry_adjacency(g, dim - 1, dim, nb)
+        except Exception as e:
+            info['adjacency_error'] = str(e)
         for i in range(1, nb + 1):
             b = {'boundary': i}
             if lengths:
@@ -922,10 +974,13 @@ def geometry_boundary_info_core(model, geom_tag: Optional[str] = None,
             boundaries.append(b)
         info['boundaries'] = boundaries
         info['boundary_count'] = nb
-        if not lengths:
-            info['measure_note'] = ('per-boundary measure not exposed by the client API; '
-                                    'derive sizes from bounding_box and geometry features '
-                                    'in model_audit output')
+        if spatial_details:
+            measured = geometry_entity_details(g, info['space_dim'] - 1, range(1, nb + 1), sample=True)
+            for boundary, detail in zip(boundaries, measured):
+                detail.pop('entity')
+                boundary.update(detail)
+        elif not lengths:
+            info['measure_note'] = 'Set spatial_details=true to measure individual boundaries.'
     except Exception as e:
         info['boundary_error'] = str(e)
 
@@ -944,6 +999,7 @@ def register_boundary_info_tool(mcp: FastMCP) -> None:
         geom_tag: Optional[str] = None,
         component_tag: Optional[str] = None,
         model_name: Optional[str] = None,
+        spatial_details: bool = False,
     ) -> dict:
         """
         Spatial context for geometry boundary numbers: overall bounding box
@@ -956,6 +1012,7 @@ def register_boundary_info_tool(mcp: FastMCP) -> None:
             geom_tag: Geometry tag (default: first geometry)
             component_tag: Component tag (default: first component)
             model_name: Model name (default: current model)
+            spatial_details: Include per-boundary bounding boxes, measurements and sampled normals
 
         Returns:
             Bounding box, length unit, per-boundary measure + adjacent domains
@@ -966,6 +1023,6 @@ def register_boundary_info_tool(mcp: FastMCP) -> None:
                     "error": f"Model not found: {model_name or 'no current model'}"}
         try:
             return geometry_boundary_info_core(model, geom_tag=geom_tag,
-                                               component_tag=component_tag)
+                                                component_tag=component_tag, spatial_details=spatial_details)
         except Exception as e:
             return {'success': False, 'error': str(e)}

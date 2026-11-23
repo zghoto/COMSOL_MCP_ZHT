@@ -24,6 +24,8 @@ from mcp.server.fastmcp import FastMCP
 
 from .session import session_manager
 from .audit import _jtags, _dump_node, _selection_info, _walk_features, _jprops
+from ..utils.numerical import read_numerical
+from ..utils.studies import solution_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +418,10 @@ def solver_feature_list_core(model, solution_tag: str) -> dict:
                 'error': f'Solution not found: {solution_tag}. Available: {tags}'}
     sol = m.sol(solution_tag)
     d = _dump_node(sol, 'solution', with_selection=False)
+    try:
+        d["diagnostics"] = solution_diagnostics(sol)
+    except Exception as exc:
+        d["diagnostics_error"] = str(exc)
     errors = []
     d['features'] = _walk_features(sol, errors)
     return {'success': True, 'solution': d, 'errors': errors or None}
@@ -479,6 +485,7 @@ _RESULT_GROUPS = {
     'dataset': lambda r: r.dataset(),
     'export': lambda r: r.export(),
     'table': lambda r: r.table(),
+    'plot': lambda r: r,
 }
 
 
@@ -498,7 +505,7 @@ def results_node_create_core(model, group: str, node_type: str,
         return err
     if tag is None:
         try:
-            tag = str(listing.uniqueTag(node_type[:3].lower()))
+            tag = str(listing.uniquetag(node_type[:3].lower()))
         except Exception:
             tag = f'{node_type.lower()}1'
     try:
@@ -511,11 +518,21 @@ def results_node_create_core(model, group: str, node_type: str,
         node = listing.get(tag)
         if selection is not None:
             report.update(_apply_selection(node, selection))
+            if 'selection_error' in report:
+                raise ValueError(report['selection_error'])
+            if isinstance(selection, list) and set(map(int, node.selection().entities())) != set(map(int, selection)):
+                raise ValueError("COMSOL did not apply the requested entities.")
         if properties:
             report['set'] = _apply_properties(node, properties)
+            if report['set']['failed']:
+                raise ValueError(f"Rejected properties: {report['set']['failed']}")
         report['node'] = _dump_node(node, group, with_selection=True)
     except Exception as e:
-        report['warning'] = f'Created, but post-read failed: {e}'
+        report.update(success=False, error=str(e))
+        try:
+            listing.remove(tag)
+        except Exception as cleanup:
+            report['cleanup_error'] = str(cleanup)
     return report
 
 
@@ -548,7 +565,7 @@ def results_node_delete_core(model, group: str, tag: str) -> dict:
 
 
 def results_numerical_evaluate_core(model, numerical_tag: str,
-                                    unit: Optional[str] = None) -> dict:
+                                    unit: Optional[str] = None, outer: Optional[int] = None) -> dict:
     """Evaluate a numerical node. Requires a computed solution for the referenced dataset."""
     try:
         node = model.java.result().numerical(numerical_tag)
@@ -558,12 +575,16 @@ def results_numerical_evaluate_core(model, numerical_tag: str,
                          f'Available: {_jtags(model.java.result().numerical().tags())}'}
     try:
         if unit:
-            node.set('unit', unit)
-        real = node.getReal()
-        values = [float(real[i]) for i in range(len(real))] if hasattr(real, '__len__') else [float(real)]
-        result = {'success': True, 'tag': numerical_tag, 'values': values,
-                  'unit': unit or None}
-        if not values:
+            original_units = list(node.getStringArray('unit'))
+            try:
+                node.set('unit', [unit] * len(node.getStringArray('expr')))
+                result = read_numerical(model.java, node, outer)
+            finally:
+                node.set('unit', original_units)
+        else:
+            result = read_numerical(model.java, node, outer)
+        result.update(success=True, tag=numerical_tag, unit=unit)
+        if result.get('values') == []:
             result['note'] = ('Empty result — the referenced dataset likely has no '
                               'computed solution data. Solve a study first.')
         return result
@@ -1060,6 +1081,7 @@ def register_modify_tools(mcp: FastMCP) -> None:
         numerical_tag: str,
         unit: Optional[str] = None,
         model_name: Optional[str] = None,
+        outer: Optional[int] = None,
     ) -> dict:
         """
         Evaluate a numerical node (created via results_node_create or from the
@@ -1070,6 +1092,7 @@ def register_modify_tools(mcp: FastMCP) -> None:
             numerical_tag: Numerical node tag, e.g. 'gev1'
             unit: Optional output unit, e.g. 'A/m^2'
             model_name: Model name (default: current model)
+            outer: Optional one-based outer solution index (default: the node's solution selection)
 
         Returns:
             Evaluated values
@@ -1078,7 +1101,7 @@ def register_modify_tools(mcp: FastMCP) -> None:
         if err:
             return err
         try:
-            return results_numerical_evaluate_core(model, numerical_tag, unit=unit)
+            return results_numerical_evaluate_core(model, numerical_tag, unit=unit, outer=outer)
         except Exception as e:
             return {'success': False, 'error': str(e)}
 

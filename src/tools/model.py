@@ -46,10 +46,8 @@ def register_model_tools(mcp: FastMCP) -> None:
                 return {"success": False, "error": f"File must be a .mph file: {file_path}"}
             
             model = client.load(str(path.absolute()))
-            name = session_manager.add_model(model)
-            
-            if set_current:
-                session_manager.set_current_model(name)
+            key = session_manager.add_model(model, set_current=set_current)
+            name = model.name() if session_manager.is_shared else key
             
             version_info = parse_version_info(name)
             
@@ -57,6 +55,7 @@ def register_model_tools(mcp: FastMCP) -> None:
                 "success": True,
                 "model": {
                     "name": name,
+                    **({"tag": key} if session_manager.is_shared else {}),
                     "file": str(path.absolute()),
                     "comsol_version": model.version(),
                     "is_versioned": version_info is not None,
@@ -87,15 +86,13 @@ def register_model_tools(mcp: FastMCP) -> None:
         
         try:
             model = client.create(name)
-            model_name = session_manager.add_model(model)
-            
-            if set_current:
-                session_manager.set_current_model(model_name)
+            key = session_manager.add_model(model, set_current=set_current)
             
             return {
                 "success": True,
                 "model": {
-                    "name": model_name,
+                    "name": model.name() if session_manager.is_shared else key,
+                    **({"tag": key} if session_manager.is_shared else {}),
                     "is_new": True,
                 }
             }
@@ -296,7 +293,7 @@ def register_model_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def model_list() -> dict:
         """
-        List all models currently loaded in the COMSOL session.
+        List models in the COMSOL session, including tags for shared server models.
         
         Returns:
             List of models with their names, file paths, and status
@@ -306,15 +303,20 @@ def register_model_tools(mcp: FastMCP) -> None:
         
         models = session_manager.models
         current = session_manager.current_model
+        shared = session_manager.is_shared
+        if shared and current not in models:
+            current = None
         
         model_list = []
-        for name, model in models.items():
+        for key, model in models.items():
             info = {
-                "name": name,
-                "is_current": name == current,
+                "name": model.name() if shared else key,
+                "is_current": key == current,
             }
+            if shared:
+                info["tag"] = key
             try:
-                info["file"] = model.file()
+                info["file"] = (model.java.getFilePath() or None) if shared else model.file()
                 info["comsol_version"] = model.version()
             except Exception:
                 pass
@@ -333,15 +335,19 @@ def register_model_tools(mcp: FastMCP) -> None:
         Set the current active model for subsequent operations.
         
         Args:
-            model_name: Name of the model to set as current
+            model_name: Server model tag or unambiguous name from model_list
         
         Returns:
             Confirmation or error message
         """
-        if session_manager.set_current_model(model_name):
+        try:
+            selected = session_manager.set_current_model(model_name)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        if selected:
             return {
                 "success": True,
-                "current_model": model_name,
+                "current_model": session_manager.current_model,
             }
         return {
             "success": False,
@@ -382,16 +388,14 @@ def register_model_tools(mcp: FastMCP) -> None:
                 java_model.label(new_name)
             
             cloned_model = mph.Model(java_model)
-            clone_name = session_manager.add_model(cloned_model)
-            
-            if set_current:
-                session_manager.set_current_model(clone_name)
+            key = session_manager.add_model(cloned_model, set_current=set_current)
             
             return {
                 "success": True,
                 "original": model.name(),
-                "clone": clone_name,
-                "is_current": clone_name == session_manager.current_model,
+                "clone": cloned_model.name() if session_manager.is_shared else key,
+                **({"tag": key} if session_manager.is_shared else {}),
+                "is_current": key == session_manager.current_model,
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to clone model: {str(e)}"}
@@ -402,18 +406,11 @@ def register_model_tools(mcp: FastMCP) -> None:
         Remove a model from memory.
         
         Args:
-            model_name: Name of the model to remove
+            model_name: Server model tag or unambiguous name of the model to remove
         
         Returns:
             Confirmation or error message
         """
-        if model_name == session_manager.current_model:
-            new_current = None
-            for name in session_manager.models.keys():
-                if name != model_name:
-                    new_current = name
-                    break
-        
         if session_manager.remove_model(model_name):
             return {
                 "success": True,

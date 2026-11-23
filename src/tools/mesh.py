@@ -1,10 +1,11 @@
 """Mesh tools for COMSOL MCP Server."""
 
-from typing import Optional
+from typing import Optional, Union
 
 from mcp.server.fastmcp import FastMCP
 
 from .session import session_manager
+from .modify import _apply_properties
 
 
 def _get_component_java(java_model, component_name=None):
@@ -41,6 +42,24 @@ def _safe_label(java_node):
     except Exception:
         pass
     return None
+
+
+def _mesh_selection(selection, entities, geometry=None, dimension=None):
+    if dimension is not None:
+        selection.geom(geometry, dimension)
+    if entities == "remaining":
+        selection.remaining()
+    elif entities == "all":
+        selection.all()
+    elif isinstance(entities, str):
+        selection.named(entities)
+    else:
+        if not entities or any(index < 1 for index in entities):
+            raise ValueError("Provide one or more positive entity IDs.")
+        selection.set(entities)
+        actual = {int(index) for index in selection.entities()}
+        if actual != set(entities):
+            raise ValueError(f"Mesh selection applied {sorted(actual)}, requested {entities}.")
 
 
 def register_mesh_tools(mcp: FastMCP) -> None:
@@ -227,10 +246,88 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to create mesh: {str(e)}"}
 
     @mcp.tool()
+    def mesh_add_feature(
+        feature_type: str,
+        mesh_name: str = "mesh1",
+        component_name: Optional[str] = None,
+        geometry_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        parent: Optional[str] = None,
+        insert_before: Optional[str] = None,
+        entity_dim: Optional[int] = None,
+        entities: Optional[Union[list[int], str]] = None,
+        selections: Optional[dict[str, Union[list[int], str]]] = None,
+        properties: Optional[dict] = None,
+    ) -> dict:
+        """Add a mesh operation or attribute, including Size, Sweep, and BndLayer.
+
+        Use parent for an attribute of an existing step, e.g. BndLayerProp.
+        Supply entity IDs, a named selection tag, 'all', or 'remaining'. Use
+        insert_before to place the new step before an existing sibling. Run
+        mesh_create afterwards to generate the mesh.
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        created_mesh = False
+        created_feature = False
+        was_automatic = False
+        comp = None
+        try:
+            comp = _get_component_java(model.java, component_name)
+            if mesh_name in _mesh_tags(comp):
+                mesh = comp.mesh(mesh_name)
+                mesh_geometry = str(mesh.geom())
+                if geometry_name is not None and geometry_name != mesh_geometry:
+                    raise ValueError(f"Mesh {mesh_name!r} is bound to geometry {mesh_geometry!r}.")
+                was_automatic = bool(mesh.isAutomatic())
+            else:
+                if parent or insert_before:
+                    raise ValueError(f"Mesh {mesh_name!r} is required for parent or insert_before.")
+                mesh_geometry = _get_geometry_tag(comp, geometry_name)
+                mesh = comp.mesh().create(mesh_name, mesh_geometry)
+                created_mesh = True
+
+            container = mesh.feature(parent) if parent else mesh
+            features = container.feature()
+            if insert_before and insert_before not in [str(tag) for tag in features.tags()]:
+                raise ValueError(f"Mesh step {insert_before!r} is not a sibling in the selected mesh path.")
+            feature_tag = str(features.uniquetag("step"))
+            feature = container.create(feature_tag, feature_type)
+            created_feature = True
+            report = _apply_properties(feature, properties or {})
+            if report["failed"]:
+                raise ValueError(str(report["failed"]))
+            if entities is not None:
+                _mesh_selection(feature.selection(), entities, mesh_geometry, entity_dim)
+            for key, values in (selections or {}).items():
+                _mesh_selection(feature.selection(key), values)
+            if insert_before:
+                siblings = [str(tag) for tag in features.tags() if str(tag) != feature_tag]
+                features.move(feature_tag, siblings.index(insert_before))
+            return {"success": True, "model": model.name(), "component": str(comp.tag()),
+                    "geometry": mesh_geometry, "mesh": mesh_name, "tag": feature_tag,
+                    "type": feature_type, "parent": parent}
+        except Exception as exc:
+            error = {"success": False, "error": f"Failed to add mesh feature: {exc}"}
+            try:
+                if created_mesh:
+                    comp.mesh().remove(mesh_name)
+                else:
+                    if created_feature:
+                        features.remove(feature_tag)
+                    if was_automatic and not mesh.isAutomatic():
+                        mesh.automatic(True)
+            except Exception as cleanup:
+                error["cleanup_error"] = str(cleanup)
+            return error
+
+    @mcp.tool()
     def mesh_info(
         mesh_name: Optional[str] = None,
         component_name: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        quality_measure: str = "skewness",
     ) -> dict:
         """
         Get mesh information using a stable Java tag.
@@ -239,6 +336,7 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             mesh_name: Mesh sequence tag (default: first mesh)
             component_name: Component name (default: first component)
             model_name: Model name (default: current model)
+            quality_measure: COMSOL element quality measure, e.g. skewness or volcircum
 
         Returns:
             Mesh tag, component, geometry, and feature information
@@ -293,6 +391,22 @@ def register_mesh_tools(mcp: FastMCP) -> None:
                 info["geometry"] = str(java_mesh.geom())
             except Exception:
                 pass
+
+            quality = {"measure": quality_measure, "available": False}
+            try:
+                stats = java_mesh.stat()
+                quality["elements"] = int(stats.getNumElem())
+                quality["vertices"] = int(stats.getNumVertex())
+                if quality["elements"]:
+                    stats.setQualityMeasure(quality_measure)
+                    quality["minimum"] = float(stats.getMinQuality())
+                    quality["mean"] = float(stats.getMeanQuality())
+                    quality["available"] = True
+                else:
+                    quality["reason"] = "The mesh has no built elements."
+            except Exception as exc:
+                quality["reason"] = str(exc)
+            info["quality"] = quality
 
             return {"success": True, "mesh": info}
         except Exception as e:

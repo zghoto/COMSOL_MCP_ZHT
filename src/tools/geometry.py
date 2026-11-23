@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 from mcp.server.fastmcp import FastMCP
 
 from .session import session_manager
+from .audit import geometry_adjacency, geometry_entity_details
 
 
 def _get_geometry_node(model, geometry_name: Optional[str], component_name: str = "comp1"):
@@ -37,6 +38,58 @@ def _get_geometry_node(model, geometry_name: Optional[str], component_name: str 
 def register_geometry_tools(mcp: FastMCP) -> None:
     """Register geometry tools with the MCP server."""
     
+    def entity_info(kind, geometry_name, component_name, model_name, entities):
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        try:
+            components = [str(tag) for tag in model.java.component().tags()]
+            component = component_name or next(iter(components), None)
+            if component is None:
+                return {"success": False, "error": "The model has no components."}
+            geom, error = _get_geometry_node(model, geometry_name, component)
+            if error:
+                return {"success": False, "error": error}
+            dim = int(geom.getSDim())
+            is_edge = kind == "edge"
+            entity_dim = 1 if is_edge else dim
+            total = int(geom.getNEdges() if is_edge else geom.getNDomains())
+            ids = list(range(1, total + 1)) if entities is None else list(entities)
+            if any(index < 1 or index > total for index in ids):
+                raise ValueError(f"{kind.capitalize()} indices must be between 1 and {total}.")
+            rows = geometry_entity_details(geom, entity_dim, ids, sample=is_edge)
+            boundaries = None if is_edge else geometry_adjacency(geom, dim, dim - 1, total)
+            for row in rows:
+                index = row.pop("entity")
+                row[f"{kind}_number"] = index
+                if boundaries is not None:
+                    row["boundaries"] = boundaries[index - 1]
+            return {"success": True, "component": component, "geometry": str(geom.tag()),
+                    "length_unit": str(geom.lengthUnit()), "space_dimension": dim,
+                    f"total_{kind}s": total, f"{kind}s": rows}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    @mcp.tool()
+    def geometry_get_edges(
+        geometry_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        component_name: Optional[str] = None,
+        entities: Optional[list[int]] = None,
+    ) -> dict:
+        """Measure edges of built geometry and locate their endpoints. Supply entity IDs to limit the query."""
+        return entity_info("edge", geometry_name, component_name, model_name, entities)
+
+    @mcp.tool()
+    def geometry_get_domains(
+        geometry_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        component_name: Optional[str] = None,
+        entities: Optional[list[int]] = None,
+    ) -> dict:
+        """Measure selected or all domains of built geometry and list their boundary IDs."""
+        return entity_info("domain", geometry_name, component_name, model_name, entities)
+
     @mcp.tool()
     def geometry_list(model_name: Optional[str] = None) -> dict:
         """
